@@ -38,7 +38,7 @@ All listed management endpoints require Firebase bearer authentication unless ma
 | --- | --- |
 | User profile and dashboard | `GET /auth/me`, `GET /dashboard/stats` |
 | Fleet/vehicle records | `POST /vehicles`, `GET /vehicles`, `DELETE /vehicles/{vehicle_id}` |
-| Device registry | `POST /devices`, `GET /devices`, `PATCH /devices/{device_id}`, `DELETE /devices/{device_id}` |
+| Device registry and Monitoring Center feed | `POST /devices`, `GET /devices`, `GET /monitoring/devices`, `PATCH /devices/{device_id}`, `DELETE /devices/{device_id}` |
 | Persons | `POST /persons`, `GET /persons`, `PATCH /persons/{person_id}`, `DELETE /persons/{person_id}` |
 | GPS location ingest (device token) | `POST /ingest/{device_id}` with `X-Device-Token` and `Idempotency-Key` |
 | Latest location, history, playback and trips | `GET /vehicles/{vehicle_id}/location`, `/history`, `/trips` |
@@ -49,6 +49,10 @@ All listed management endpoints require Firebase bearer authentication unless ma
 | Push notifications | `POST /notifications/tokens`, `DELETE /notifications/tokens/{token_id}` |
 
 Ingest timestamps must include a timezone. Geofence radius is measured in meters. Device online status defaults to having communicated in the last 10 minutes and can be adjusted with `ONLINE_WINDOW_MINUTES`.
+
+`GET /monitoring/devices` returns a paginated list of the authenticated user's devices, vehicle names, connection status, and latest location. Optional query parameters are `imei` and `company` (case-insensitive partial matches), `status` (`all`, `online`, `offline`, or `not_active`), `limit` (1-500), and `offset`. Each new GPS ingest is tagged with its device ID so multiple trackers assigned to the same vehicle retain their individual latest positions. Older location rows without a device ID are still returned as a vehicle-level fallback.
+
+The Monitoring Center API supplies positions and status; it does not provide map tiles or a satellite layer. The frontend must render the `latest_location` coordinates using its configured map provider. GPS hardware must send location updates to `POST /ingest/{device_id}`; the API cannot determine a device's position without those reports.
 
 ## Live tracking
 

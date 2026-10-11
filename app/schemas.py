@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -113,6 +114,7 @@ class LocationInput(BaseModel):
 class LocationRead(BaseModel):
     id: int
     vehicle_id: uuid.UUID
+    device_id: uuid.UUID | None
     recorded_at: datetime
     latitude: float
     longitude: float
@@ -121,6 +123,20 @@ class LocationRead(BaseModel):
     ignition_on: bool | None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MonitoringDeviceRead(DeviceSummary):
+    vehicle_name: str
+    connection_status: Literal["online", "offline", "not_active"]
+    is_online: bool
+    latest_location: LocationRead | None
+
+
+class MonitoringDevicePage(BaseModel):
+    items: list[MonitoringDeviceRead]
+    total: int
+    limit: int
+    offset: int
 
 
 class GeofenceCreate(BaseModel):

@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 import firebase_admin
 from firebase_admin import auth
@@ -52,6 +52,8 @@ from app.schemas import (
     HealthRead,
     LocationInput,
     LocationRead,
+    MonitoringDevicePage,
+    MonitoringDeviceRead,
     PersonCreate,
     PersonRead,
     PersonUpdate,
@@ -288,6 +290,138 @@ def list_devices(user: CurrentUser, db: Database) -> list[Device]:
     )
 
 
+@app.get("/monitoring/devices", response_model=MonitoringDevicePage)
+def monitoring_devices(
+    user: CurrentUser,
+    db: Database,
+    imei: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
+    company: Annotated[str | None, Query(min_length=1, max_length=160)] = None,
+    status_filter: Annotated[
+        Literal["all", "online", "offline", "not_active"], Query(alias="status")
+    ] = "all",
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> MonitoringDevicePage:
+    since = datetime.now(timezone.utc) - timedelta(minutes=settings.online_window_minutes)
+    conditions = [Device.owner_id == user.id]
+    if imei is not None:
+        imei = imei.strip()
+        if not imei:
+            raise HTTPException(status_code=422, detail="IMEI filter cannot be blank")
+        conditions.append(Device.imei.ilike(f"%{imei}%"))
+    if company is not None:
+        company = company.strip()
+        if not company:
+            raise HTTPException(status_code=422, detail="Company filter cannot be blank")
+        conditions.append(Device.company_name.ilike(f"%{company}%"))
+    if status_filter == "online":
+        conditions.extend(
+            [Device.is_active.is_(True), Device.last_communication_at >= since]
+        )
+    elif status_filter == "offline":
+        conditions.extend(
+            [
+                Device.is_active.is_(True),
+                or_(Device.last_communication_at.is_(None), Device.last_communication_at < since),
+            ]
+        )
+    elif status_filter == "not_active":
+        conditions.append(Device.is_active.is_(False))
+
+    total = db.scalar(
+        select(func.count())
+        .select_from(Device)
+        .join(Vehicle, Vehicle.id == Device.vehicle_id)
+        .where(*conditions)
+    ) or 0
+    rows = db.execute(
+        select(Device, Vehicle.name)
+        .join(Vehicle, Vehicle.id == Device.vehicle_id)
+        .where(*conditions)
+        .order_by(Device.last_communication_at.desc().nulls_last(), Device.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    device_ids = {device.id for device, _ in rows}
+    vehicle_ids = {device.vehicle_id for device, _ in rows}
+    latest_by_device: dict[uuid.UUID, Location] = {}
+    latest_legacy_by_vehicle: dict[uuid.UUID, Location] = {}
+    if device_ids:
+        ranked_device_locations = (
+            select(
+                Location.id.label("location_id"),
+                Location.device_id.label("device_id"),
+                func.row_number()
+                .over(
+                    partition_by=Location.device_id,
+                    order_by=(Location.recorded_at.desc(), Location.id.desc()),
+                )
+                .label("position"),
+            )
+            .where(Location.device_id.in_(device_ids))
+            .subquery()
+        )
+        device_points = db.scalars(
+            select(Location)
+            .join(
+                ranked_device_locations,
+                ranked_device_locations.c.location_id == Location.id,
+            )
+            .where(ranked_device_locations.c.position == 1)
+        )
+        latest_by_device = {point.device_id: point for point in device_points if point.device_id}
+        ranked_legacy_locations = (
+            select(
+                Location.id.label("location_id"),
+                Location.vehicle_id.label("vehicle_id"),
+                func.row_number()
+                .over(
+                    partition_by=Location.vehicle_id,
+                    order_by=(Location.recorded_at.desc(), Location.id.desc()),
+                )
+                .label("position"),
+            )
+            .where(Location.device_id.is_(None), Location.vehicle_id.in_(vehicle_ids))
+            .subquery()
+        )
+        legacy_points = db.scalars(
+            select(Location)
+            .join(
+                ranked_legacy_locations,
+                ranked_legacy_locations.c.location_id == Location.id,
+            )
+            .where(ranked_legacy_locations.c.position == 1)
+        )
+        latest_legacy_by_vehicle = {point.vehicle_id: point for point in legacy_points}
+
+    items: list[MonitoringDeviceRead] = []
+    for device, vehicle_name in rows:
+        last_communication = device.last_communication_at
+        if last_communication is not None and last_communication.tzinfo is None:
+            last_communication = last_communication.replace(tzinfo=timezone.utc)
+        is_online = bool(
+            device.is_active and last_communication is not None and last_communication >= since
+        )
+        connection_status = (
+            "not_active"
+            if not device.is_active
+            else "online"
+            if is_online
+            else "offline"
+        )
+        items.append(
+            MonitoringDeviceRead(
+                **DeviceSummary.model_validate(device).model_dump(),
+                vehicle_name=vehicle_name,
+                connection_status=connection_status,
+                is_online=is_online,
+                latest_location=latest_by_device.get(device.id)
+                or latest_legacy_by_vehicle.get(device.vehicle_id),
+            )
+        )
+    return MonitoringDevicePage(items=items, total=total, limit=limit, offset=offset)
+
+
 @app.patch("/devices/{device_id}", response_model=DeviceSummary)
 def update_device(
     device_id: uuid.UUID,
@@ -388,7 +522,7 @@ async def ingest_location(
     vehicle = db.get(Vehicle, device.vehicle_id)
     if vehicle is None:
         raise HTTPException(status_code=404, detail="Device vehicle no longer exists")
-    point = Location(vehicle_id=vehicle.id, **payload.model_dump())
+    point = Location(vehicle_id=vehicle.id, device_id=device.id, **payload.model_dump())
     device.last_communication_at = payload.recorded_at
     db.add(point)
     db.flush()

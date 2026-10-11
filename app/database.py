@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from sqlite3 import Connection as SQLiteConnection
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
@@ -29,6 +29,24 @@ def initialize_database(bind=engine) -> None:
         with bind.begin() as connection:
             connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
     Base.metadata.create_all(bind=bind)
+    location_columns = {column["name"] for column in inspect(bind).get_columns("locations")}
+    if "device_id" not in location_columns:
+        device_id_type = "UUID" if bind.dialect.name == "postgresql" else "CHAR(32)"
+        with bind.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE locations ADD COLUMN device_id "
+                    f"{device_id_type} REFERENCES devices(id) ON DELETE SET NULL"
+                )
+            )
+    if bind.dialect.name in {"postgresql", "sqlite"}:
+        with bind.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_locations_device_recorded "
+                    "ON locations (device_id, recorded_at)"
+                )
+            )
     if bind.dialect.name == "postgresql":
         with bind.begin() as connection:
             connection.execute(

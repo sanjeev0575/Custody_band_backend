@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -65,6 +66,91 @@ def test_firebase_user_sync_and_tenant_isolation(client: TestClient) -> None:
     )
     assert hidden_vehicle.status_code == 404
     assert client.get("/vehicles", headers=headers).json()[0]["name"] == "Truck 1"
+
+
+def test_monitoring_devices_include_latest_location_and_filters(client: TestClient) -> None:
+    headers = auth_headers()
+
+    def register_device(imei: str, company_name: str) -> dict[str, Any]:
+        vehicle_response = client.post(
+            "/vehicles",
+            json={"name": f"Vehicle {imei}"},
+            headers=headers,
+        )
+        assert vehicle_response.status_code == 201
+        response = client.post(
+            "/devices",
+            json={
+                "vehicle_id": vehicle_response.json()["id"],
+                "imei": imei,
+                "name": f"Tracker {imei}",
+                "company_name": company_name,
+            },
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    online_device = register_device("123456789012345", "North Fleet")
+    offline_device = register_device("987654321098765", "South Fleet")
+    inactive_device = register_device("111122223333444", "North Fleet")
+    client.patch(
+        f"/devices/{inactive_device['id']}",
+        json={"is_active": False},
+        headers=headers,
+    ).raise_for_status()
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    ingested = client.post(
+        f"/ingest/{online_device['id']}",
+        headers={
+            "X-Device-Token": online_device["token"],
+            "Idempotency-Key": "monitor-location-0001",
+        },
+        json={"recorded_at": timestamp, "latitude": 17.4, "longitude": 78.4},
+    )
+    assert ingested.status_code == 201, ingested.text
+    assert ingested.json()["device_id"] == online_device["id"]
+
+    response = client.get("/monitoring/devices", params={"status": "online"}, headers=headers)
+    assert response.status_code == 200, response.text
+    page = response.json()
+    assert page["total"] == 1
+    item = page["items"][0]
+    assert item["imei"] == "123456789012345"
+    assert item["connection_status"] == "online"
+    assert item["is_online"] is True
+    assert item["latest_location"]["latitude"] == 17.4
+    assert item["latest_location"]["longitude"] == 78.4
+    assert item["latest_location"]["device_id"] == online_device["id"]
+
+    response = client.get(
+        "/monitoring/devices",
+        params={
+            "imei": offline_device["imei"][:6],
+            "company": "south",
+            "status": "offline",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert [device["imei"] for device in response.json()["items"]] == ["987654321098765"]
+
+    response = client.get(
+        "/monitoring/devices",
+        params={"status": "not_active"},
+        headers=headers,
+    )
+    assert [device["imei"] for device in response.json()["items"]] == ["111122223333444"]
+    assert client.get(
+        "/monitoring/devices",
+        headers=auth_headers("another-user"),
+    ).json()["items"] == []
+    assert client.get(
+        "/monitoring/devices",
+        params={"status": "unknown"},
+        headers=headers,
+    ).status_code == 422
 
 
 def test_invalid_firebase_token_is_rejected(client: TestClient) -> None:

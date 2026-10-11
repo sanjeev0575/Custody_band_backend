@@ -78,10 +78,16 @@ class Device(Base):
 
 class Location(Base):
     __tablename__ = "locations"
-    __table_args__ = (Index("ix_locations_vehicle_recorded", "vehicle_id", "recorded_at"),)
+    __table_args__ = (
+        Index("ix_locations_vehicle_recorded", "vehicle_id", "recorded_at"),
+        Index("ix_locations_device_recorded", "device_id", "recorded_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     vehicle_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"), index=True)
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     latitude: Mapped[float] = mapped_column(Float)
     longitude: Mapped[float] = mapped_column(Float)
